@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="ms">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sistem Pengurusan B&K v6.0 - Berasaskan Awan</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.23/jspdf.plugin.autotable.min.js"></script>
+    
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .nav-button.active { border-bottom-color: #4f46e5; color: #4f46e5; font-weight: 600; }
+        .modal { z-index: 1000; } .modal-content { max-height: 85vh; }
+        .gantt-chart { display: grid; grid-template-columns: 250px repeat(12, 1fr); gap: 2px; }
+        .gantt-header { background-color: #f3f4f6; font-weight: 600; padding: 0.5rem; text-align: center; }
+        .gantt-program { background-color: #f9fafb; padding: 0.5rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-right: 2px solid #e5e7eb; }
+        .gantt-cell { background-color: #ffffff; min-height: 2rem; border-bottom: 1px solid #f3f4f6; position: relative; }
+        .gantt-bar { position: absolute; top: 20%; bottom: 20%; left: 0; right: 0; border-radius: 9999px; opacity: 0.8; }
+        .prose img { max-width: 100%; border-radius: 0.5rem; }
+        .prose p { margin-bottom: 1em; }
+        .prose h3 { margin-top: 1.5em; margin-bottom: 0.5em; }
+    </style>
+
+    <script type="text/javascript">
+    /*
+        USER GUIDE FOR GOOGLE SHEETS SETUP (v6.0)
+        1. Create a new Google Sheet.
+        2. In the first row (headers), create the following columns IN THIS EXACT ORDER:
+           id, tajuk, pengenalan, matlamat, objektif, sasaran, tarikh_hari, tempat, bidang, tentatif, kaedah, penilaian, anggaran_perbelanjaan, jawatankuasa, disediakan_oleh, disemak_oleh, penutup, status, laporan_pelaksanaan, gambar_urls
+        3. Follow a guide like https://github.com/derek73/gs-crud#prerequisites to get your Google API Key, Client ID, and your Sheet ID.
+    */
+    var gapi, google, tokenClient;
+    const CONFIG_KEY = 'b&k_config_v60';
+    let APP_CONFIG = { API_KEY: '', CLIENT_ID: '', SHEET_ID: '' };
+    const DISCOVERY_DOCS = ["https://sheets.googleapis.com/$discovery/rest?version=v4"];
+    const SCOPES = "https://www.googleapis.com/auth/spreadsheets";
+    const SHEET_RANGE = 'Sheet1!A:T';
+
+    let activities = [];
+    let selectedYear = new Date().getFullYear().toString();
+    let activityToDeleteId = null;
+    const HEADERS = ['id', 'tajuk', 'pengenalan', 'matlamat', 'objektif', 'sasaran', 'tarikh_hari', 'tempat', 'bidang', 'tentatif', 'kaedah', 'penilaian', 'anggaran_perbelanjaan', 'jawatankuasa', 'disediakan_oleh', 'disemak_oleh', 'penutup', 'status', 'laporan_pelaksanaan', 'gambar_urls'];
+
+    // --- GAPI & GIS INITIALIZATION & AUTH ---
+    function gapiLoaded() { if(window.gapi) { gapi = window.gapi; gapi.load('client', initializeGapiClient); } }
+    function gisLoaded() { if(window.google) { google = window.google; initializeGisClient(); } }
+    
+    async function initializeGapiClient() {
+        if (!APP_CONFIG.API_KEY || !gapi || !gapi.client) return;
+        try {
+            await gapi.client.init({ apiKey: APP_CONFIG.API_KEY, discoveryDocs: DISCOVERY_DOCS });
+        } catch (error) { console.error("Error initializing GAPI client:", error); }
+    }
+
+    function initializeGisClient() {
+        if (!google || !google.accounts || !APP_CONFIG.CLIENT_ID) return;
+        tokenClient = google.accounts.oauth2.initTokenClient({
+            client_id: APP_CONFIG.CLIENT_ID, scope: SCOPES,
+            callback: (tokenResponse) => {
+                if (tokenResponse && tokenResponse.access_token) {
+                    gapi.client.setToken(tokenResponse);
+                    document.getElementById('auth-status').innerText = 'Disahkan';
+                    document.getElementById('auth-status').className = 'font-semibold text-green-600';
+                    document.getElementById('auth-button').innerText = 'Log Keluar';
+                    loadDataFromSheet();
+                }
+            },
+        });
+    }
+
+    // --- All other functions are defined in the main script block at the end of the body ---
+    </script>
+    
+    <script async defer src="https://apis.google.com/js/api.js" onload="gapiLoaded()"></script>
+    <script async defer src="https://accounts.google.com/gsi/client" onload="gisLoaded()"></script>
+</head>
+<body class="bg-gray-100 text-gray-800">
+
+    <!-- Modals and Loading overlay -->
+    <div id="loading-overlay" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center hidden z-20"><div class="text-white text-xl font-semibold">Memproses...</div></div>
+    
+    <div id="settings-modal" class="fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center p-4 modal">
+        <div class="bg-white rounded-xl shadow-2xl p-6 md:p-8 w-full max-w-2xl">
+            <h2 class="text-2xl font-bold mb-4">Konfigurasi Awal Google Sheets</h2>
+            <p class="text-gray-600 mb-6">Sila masukkan maklumat API Google dan ID Sheet anda. Pastikan Sheet anda mempunyai lajur yang betul (rujuk komen dalam kod).</p>
+            <div class="space-y-4">
+                <input type="password" id="apiKey" class="w-full rounded p-2 border" placeholder="Google API Key">
+                <input type="password" id="clientId" class="w-full rounded p-2 border" placeholder="Google Client ID">
+                <input type="text" id="sheetId" class="w-full rounded p-2 border" placeholder="Google Sheet ID">
+            </div>
+            <div class="mt-8 flex justify-end">
+                <button id="save-settings-btn" class="bg-indigo-600 text-white font-semibold py-2 px-6 rounded-lg hover:bg-indigo-700">Simpan & Teruskan</button>
+            </div>
+        </div>
+    </div>
+    
+    <div id="kertas-kerja-modal" class="fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center p-4 modal hidden">
+        <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-4xl">
+            <h2 class="text-2xl font-bold mb-4 border-b pb-2">Borang Kertas Kerja</h2>
+            <div class="space-y-4 overflow-y-auto modal-content pr-4">
+                <input type="hidden" id="kk-activity-id">
+                <input type="text" id="kk-tajuk" placeholder="1.0 Tajuk Program" class="w-full font-bold p-2 border rounded">
+                <textarea id="kk-pengenalan" rows="3" placeholder="2.0 Pengenalan" class="w-full p-2 border rounded"></textarea>
+                <textarea id="kk-matlamat" rows="2" placeholder="3.0 Matlamat" class="w-full p-2 border rounded"></textarea>
+                <textarea id="kk-objektif" rows="3" placeholder="4.0 Objektif (satu objektif setiap baris)" class="w-full p-2 border rounded"></textarea>
+                <div class="border p-4 rounded-lg bg-gray-50"><h3 class="font-semibold mb-2">5.0 Butiran Pelaksanaan</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <input type="text" id="kk-sasaran" placeholder="Kumpulan Sasaran" class="p-2 border rounded">
+                        <select id="kk-bidang" class="p-2 border rounded"><option value="">-- Pilih Bidang Perkhidmatan --</option><option>Pembangunan Diri Murid</option><option>Peningkatan Disiplin</option><option>Pendidikan Kerjaya</option><option>Psikososial & Kesejahteraan Mental</option></select>
+                        <input type="text" id="kk-tarikh" placeholder="Jangkamasa / Tarikh & Hari" class="p-2 border rounded">
+                        <input type="text" id="kk-tempat" placeholder="Tempat" class="p-2 border rounded">
+                    </div>
+                </div>
+                <textarea id="kk-tentatif" rows="5" placeholder="6.0 Tentatif Program (cth: 8:00 AM - Pendaftaran)" class="w-full p-2 border rounded"></textarea>
+                <textarea id="kk-kaedah" rows="3" placeholder="7.0 Kaedah Pelaksanaan" class="w-full p-2 border rounded"></textarea>
+                <textarea id="kk-penilaian" rows="3" placeholder="8.0 Penilaian Keberkesanan Program" class="w-full p-2 border rounded"></textarea>
+                <div class="border p-4 rounded-md"><h3 class="font-semibold mb-2">9.0 Implikasi Kewangan</h3><div id="kk-kewangan-items" class="space-y-2"></div><button type="button" id="add-kewangan-item" class="mt-2 text-sm bg-gray-200 px-3 py-1 rounded hover:bg-gray-300">+ Tambah Butiran</button></div>
+                <textarea id="kk-jawatankuasa" rows="5" placeholder="10.0 Jawatankuasa Kerja (cth: Pengerusi - Nama Penuh)" class="w-full p-2 border rounded"></textarea>
+                <div class="border p-4 rounded-lg bg-gray-50"><h3 class="font-semibold mb-2">11.0 Pengesahan</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <input type="text" id="kk-disediakan" placeholder="Disediakan oleh (Nama & Jawatan)" class="p-2 border rounded">
+                        <input type="text" id="kk-disemak" placeholder="Disemak oleh (Nama & Jawatan)" class="p-2 border rounded">
+                    </div>
+                </div>
+                <textarea id="kk-penutup" rows="2" placeholder="12.0 Penutup" class="w-full p-2 border rounded"></textarea>
+            </div>
+            <div class="mt-6 flex justify-end space-x-3 border-t pt-4"><button type="button" id="cancel-kk-btn" class="bg-gray-300 text-gray-800 py-2 px-4 rounded-lg">Batal</button><button type="button" id="save-kk-btn" class="bg-green-600 text-white py-2 px-4 rounded-lg">Simpan Kertas Kerja</button></div>
+        </div>
+    </div>
+    <div id="report-modal" class="fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center p-4 modal hidden">
+        <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-2xl">
+            <h2 class="text-xl font-bold mb-4" id="report-modal-title">Buat Laporan Pelaksanaan</h2>
+            <div class="space-y-4 modal-content overflow-y-auto"><input type="hidden" id="report-activity-id"><textarea id="report-laporan" rows="8" placeholder="Tulis laporan pelaksanaan program di sini..." class="w-full p-2 border rounded"></textarea><textarea id="report-gambar-urls" rows="3" placeholder="Masukkan pautan URL gambar di sini, pisahkan dengan koma (,)" class="w-full p-2 border rounded"></textarea></div>
+            <div class="mt-6 flex justify-end space-x-3"><button id="cancel-report-btn" class="bg-gray-300 text-gray-800 py-2 px-4 rounded-lg">Batal</button><button id="save-report-btn" class="bg-blue-600 text-white py-2 px-4 rounded-lg">Simpan Laporan</button></div>
+        </div>
+    </div>
+    <div id="view-report-modal" class="fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center p-4 modal hidden">
+        <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-3xl">
+             <div class="flex justify-between items-center border-b pb-2 mb-4"><h2 class="text-xl font-bold" id="view-report-title">Laporan Pelaksanaan</h2><button id="close-view-report-btn" class="text-2xl font-bold">&times;</button></div>
+            <div class="space-y-4 modal-content overflow-y-auto prose max-w-none" id="view-report-content"></div>
+            <div class="mt-6 flex justify-end border-t pt-4"><button id="download-report-pdf-btn" class="bg-teal-600 text-white font-semibold py-2 px-4 rounded-lg hover:bg-teal-700">Muat Turun Laporan PDF</button></div>
+        </div>
+    </div>
+    <div id="confirm-delete-modal" class="fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center p-4 modal hidden">
+        <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-sm text-center">
+            <h3 class="text-lg font-bold mb-4">Sahkan Padam</h3><p class="text-gray-600 mb-6">Adakah anda pasti mahu memadam aktiviti ini?</p>
+            <div class="flex justify-center space-x-4"><button id="cancel-delete-btn" class="bg-gray-200 text-gray-800 py-2 px-6 rounded-lg">Batal</button><button id="confirm-delete-btn" class="bg-red-600 text-white py-2 px-6 rounded-lg">Padam</button></div>
+        </div>
+    </div>
+
+    <!-- Main Container -->
+    <div id="main-container" class="container mx-auto p-4 md:p-8 max-w-7xl hidden">
+         <header class="flex flex-col md:flex-row justify-between items-start md:items-center mb-6">
+            <div><h1 class="text-3xl md:text-4xl font-bold text-gray-900">Sistem Pengurusan B&K v6.0</h1><p class="text-lg text-gray-600 mt-2">Status: <span id="auth-status" class="font-semibold text-red-500">Belum Disahkan</span></p></div>
+            <button id="auth-button" class="mt-4 md:mt-0 bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg hover:bg-blue-700">Log Masuk Google</button>
+        </header>
+        <nav id="main-nav" class="bg-white rounded-xl shadow-md p-2 mb-8"><div class="flex border-b text-sm sm:text-base flex-wrap">
+            <button data-page="aktiviti_utama" class="nav-button flex-grow py-3 text-center border-b-2 active">Aktiviti Utama</button>
+            <button data-page="kertas_kerja" class="nav-button flex-grow py-3 text-center border-b-2">Kertas Kerja</button>
+            <button data-page="takwim" class="nav-button flex-grow py-3 text-center border-b-2">Takwim</button>
+            <button data-page="carta_gantt" class="nav-button flex-grow py-3 text-center border-b-2">Carta Gantt</button>
+            <button data-page="rumusan" class="nav-button flex-grow py-3 text-center border-b-2">Rumusan</button>
+            <button data-page="pelaporan" class="nav-button flex-grow py-3 text-center border-b-2">Pelaporan</button>
+            <button data-page="kewangan" class="nav-button flex-grow py-3 text-center border-b-2">Kewangan</button>
+        </div></nav>
+        <div id="page-content"></div>
+    </div>
+
+<script type="text/javascript">
+// This script block will now contain ALL the function definitions
+document.addEventListener('DOMContentLoaded', () => {
+    // --- MOCK DATA ---
+    function generateSampleData() {
+        const currentYear = new Date().getFullYear();
+        const lastYear = currentYear - 1;
+        return [
+            { id: `1729000000000`, tajuk: `Program Motivasi SPM ${currentYear}`, pengenalan: '...', matlamat: '...', objektif: 'Teknik Belajar', sasaran: 'Murid T5', tarikh_hari: `15 Oktober ${currentYear}`, tempat: 'Dewan Gemilang', bidang: 'Pendidikan Kerjaya', tentatif: '...', kaedah: '...', penilaian: '...', anggaran_perbelanjaan: [{ butiran: 'Penceramah', kuantiti: '1', kos_seunit: '500' }], jawatankuasa: '...', disediakan_oleh: '...', disemak_oleh: '...', penutup: '...', status: 'Dirancang', laporan_pelaksanaan: null, gambar_urls: null },
+            { id: `1696118400000`, tajuk: `Minggu Kerjaya ${lastYear}`, pengenalan: '...', matlamat: '...', objektif: 'Pendedahan Kerjaya', sasaran: `Murid T4 & T5`, tarikh_hari: `01 Oktober ${lastYear}`, tempat: 'Kantin', bidang: 'Pendidikan Kerjaya', tentatif: '...', kaedah: '...', penilaian: '...', anggaran_perbelanjaan: [{ butiran: 'Pameran', kuantiti: '5', kos_seunit: '200' }], jawatankuasa: '...', disediakan_oleh: '...', disemak_oleh: '...', penutup: '...', status: 'Selesai', laporan_pelaksanaan: 'Sangat berjaya.', gambar_urls: 'https://placehold.co/400x300' }
+        ];
+    }
+
+    // --- DATA HANDLING ---
+    function loadDataFromStorage() {
+        const data = localStorage.getItem(STORAGE_KEY);
+        activities = data ? JSON.parse(data) : generateSampleData();
+        if (!data) saveDataToStorage();
+    }
+    function saveDataToStorage() { localStorage.setItem(STORAGE_KEY, JSON.stringify(activities)); }
+
+    // --- PAGE RENDERING ---
+    function renderCurrentPage() {
+        const activeNav = document.querySelector('.nav-button.active');
+        if (activeNav) renderPage(activeNav.dataset.page);
+    }
+    window.renderCurrentPage = renderCurrentPage;
+
+    function renderPage(pageId) {
+        const content = document.getElementById('page-content');
+        let title = '';
+        switch(pageId) {
+            case 'aktiviti_utama': title = 'Aktiviti Utama'; break;
+            case 'kertas_kerja': title = 'Urus Kertas Kerja'; break;
+            case 'carta_gantt': title = 'Carta Gantt'; break;
+            default: title = pageId.charAt(0).toUpperCase() + pageId.slice(1);
+        }
+        let html = `<div class="bg-white p-6 rounded-xl shadow-md">`;
+        const pagesWithFilter = ['takwim', 'rumusan', 'pelaporan', 'kewangan', 'carta_gantt'];
+        if (pagesWithFilter.includes(pageId)) {
+            const years = [...new Set(activities.map(act => (act.tarikh_hari.match(/\b\d{4}\b/) || [])[0]).filter(Boolean))].sort((a, b) => b - a);
+            html += `<div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 border-b pb-4 gap-4"><div class="flex items-center"><h2 class="text-2xl font-bold text-gray-800 mr-4">${title}</h2><select id="year-filter" class="p-2 border rounded-md shadow-sm"><option value="semua">Semua Tahun</option>${years.map(year => `<option value="${year}" ${selectedYear === year ? 'selected' : ''}>${year}</option>`).join('')}</select></div><button id="pdf-download-btn" class="bg-teal-600 text-white font-semibold py-2 px-4 rounded-lg hover:bg-teal-700 w-full sm:w-auto">Muat Turun PDF</button></div>`;
+        } else {
+            html += `<div class="flex justify-between items-center mb-4 border-b pb-4"><h2 class="text-2xl font-bold text-gray-800">${title}</h2></div>`;
+        }
+        switch(pageId) {
+            case 'aktiviti_utama': html += renderAktivitiUtama(); break;
+            case 'kertas_kerja': html += renderKertasKerja(); break;
+            case 'takwim': html += renderTakwim(); break;
+            case 'carta_gantt': html += renderCartaGantt(); break;
+            case 'rumusan': html += renderRumusan(); break;
+            case 'pelaporan': html += renderPelaporan(); break;
+            case 'kewangan': html += renderKewangan(); break;
+        }
+        content.innerHTML = html + `</div>`;
+    }
+    window.renderPage = renderPage;
+
+    function getFilteredActivities() {
+        if (selectedYear === 'semua') return [...activities];
+        return activities.filter(act => (act.tarikh_hari || '').includes(selectedYear));
+    }
+    window.getFilteredActivities = getFilteredActivities;
+
+    function renderAktivitiUtama() {
+        const formHtml = `<div class="mb-6 p-4 border rounded-lg bg-gray-50"><h3 class="font-bold text-lg mb-3">Tambah / Kemas Kini Aktiviti</h3><input type="hidden" id="edit-activity-id"><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"><input type="text" id="main-tajuk" placeholder="Tajuk Program" class="p-2 border rounded"><input type="text" id="main-tarikh" placeholder="Tarikh & Hari" class="p-2 border rounded"><select id="main-bidang" class="p-2 border rounded"><option value="">-- Pilih Bidang --</option><option>Pembangunan Diri Murid</option><option>Peningkatan Disiplin</option><option>Pendidikan Kerjaya</option><option>Psikososial & Kesejahteraan Mental</option></select><input type="text" id="main-objektif" placeholder="Tujuan / Objektif Ringkas" class="p-2 border rounded md:col-span-2 lg:col-span-1"><input type="text" id="main-sasaran" placeholder="Sasaran" class="p-2 border rounded"><input type="number" id="main-kewangan" placeholder="Anggaran Kos (RM)" class="p-2 border rounded"></div><div class="mt-4 flex justify-end space-x-3"><button id="clear-main-form" type="button" class="bg-gray-200 text-gray-700 font-semibold py-2 px-4 rounded-lg hover:bg-gray-300">Kosongkan</button><button id="save-main-activity" class="bg-indigo-600 text-white font-semibold py-2 px-6 rounded-lg hover:bg-indigo-700">Simpan</button></div></div>`;
+        let listHtml = `<h3 class="font-bold text-lg mb-3">Senarai Aktiviti Tahunan</h3><div class="space-y-3">`;
+        if (activities.length > 0) {
+            listHtml += activities.sort((a, b) => b.id.localeCompare(a.id)).map(act => `<div class="border p-3 rounded-lg flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3"><div><p class="font-bold text-indigo-700">${act.tajuk}</p><p class="text-sm text-gray-600">${act.tarikh_hari} | ${act.bidang}</p></div><div class="flex space-x-2 self-end sm:self-center"><button data-id="${act.id}" class="edit-activity-btn text-sm bg-yellow-500 text-white px-3 py-1 rounded hover:bg-yellow-600">Edit</button><button data-id="${act.id}" class="delete-activity-btn text-sm bg-red-600 text-white px-3 py-1 rounded hover:bg-red-700">Padam</button></div></div>`).join('');
+        } else {
+            listHtml += `<p class="text-center text-gray-500 py-4">Tiada aktiviti ditambah lagi.</p>`;
+        }
+        listHtml += `</div>`;
+        return formHtml + listHtml;
+    }
+
+    function renderKertasKerja() {
+        let html = `<p class="mb-4 text-gray-600">Pilih satu aktiviti daripada senarai di bawah untuk menambah butiran lengkap dan menjana dokumen Kertas Kerja rasmi.</p>`;
+        if (activities.length > 0) {
+            html += activities.sort((a,b)=>b.id.localeCompare(a.id)).map(act => `<div class="border p-3 rounded-lg flex justify-between items-center mb-3"><div><p class="font-bold">${act.tajuk}</p><p class="text-sm text-gray-500">${act.tarikh_hari}</p></div><button data-id="${act.id}" class="upgrade-kk-btn bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg hover:bg-blue-700">Lengkapkan Kertas Kerja</button></div>`).join('');
+        } else {
+            html += `<p class="text-center text-gray-500 py-4">Sila tambah aktiviti di tab "Aktiviti Utama" terlebih dahulu.</p>`;
+        }
+        return html;
+    }
+
+    function renderTakwim() {
+        const filteredActivities = getFilteredActivities(); filteredActivities.sort((a, b) => b.id.localeCompare(a.id));
+        let tableBody = filteredActivities.map((act, index) => `<tr class="border-b hover:bg-gray-50"><td class="py-3 px-4 text-center">${index + 1}</td><td class="py-3 px-4">${act.tarikh_hari}</td><td class="py-3 px-4 font-semibold text-gray-800">${act.tajuk}</td><td class="py-3 px-4 text-gray-600">${act.tempat}</td><td class="py-3 px-4 text-gray-600">${act.sasaran}</td></tr>`).join('');
+        return `<div class="overflow-x-auto"><table class="w-full text-left"><thead class="bg-gray-100"><tr><th class="py-3 px-4 text-center">Bil.</th><th class="py-3 px-4">Tarikh & Hari</th><th class="py-3 px-4">Program / Aktiviti</th><th class="py-3 px-4">Tempat</th><th class="py-3 px-4">Sasaran</th></tr></thead><tbody>${tableBody || `<tr><td colspan="5" class="text-center p-6 text-gray-500">Tiada program untuk tahun ${selectedYear}.</td></tr>`}</tbody></table></div>`;
+    }
+
+    function renderCartaGantt() {
+        const filteredActivities = getFilteredActivities();
+        const months = ['Jan', 'Feb', 'Mac', 'Apr', 'Mei', 'Jun', 'Jul', 'Ogo', 'Sep', 'Okt', 'Nov', 'Dis'];
+        const monthMap = { jan:0, feb:1, mac:2, apr:3, mei:4, jun:5, jul:6, ogo:7, sep:8, okt:9, nov:10, dis:11 };
+        const bidangColors = { 'Pendidikan Kerjaya': 'bg-blue-500', 'Peningkatan Disiplin': 'bg-red-500', 'Pembangunan Diri Murid': 'bg-green-500', 'Psikososial & Kesejahteraan Mental': 'bg-yellow-500', 'default': 'bg-gray-500' };
+        let chartHtml = '<div class="gantt-chart text-xs sm:text-sm overflow-x-auto"><div class="gantt-header sticky left-0 z-10 bg-gray-100">Program</div>';
+        months.forEach(m => chartHtml += `<div class="gantt-header">${m}</div>`);
+        if (filteredActivities.length === 0) {
+            chartHtml += `<div class="col-span-13 text-center p-6 text-gray-500">Tiada program untuk tahun ${selectedYear}.</div>`;
+        } else {
+            filteredActivities.sort((a,b) => a.id.localeCompare(b.id)).forEach(act => {
+                chartHtml += `<div class="gantt-program sticky left-0 z-10" title="${act.tajuk}">${act.tajuk}</div>`;
+                const activityMonths = new Array(12).fill(false);
+                const dateText = (act.tarikh_hari || '').toLowerCase();
+                Object.keys(monthMap).forEach(mKey => { if (dateText.includes(mKey)) { activityMonths[monthMap[mKey]] = true; } });
+                activityMonths.forEach(isActive => {
+                    chartHtml += '<div class="gantt-cell">';
+                    if (isActive) {
+                        const color = bidangColors[act.bidang] || bidangColors.default;
+                        chartHtml += `<div class="gantt-bar ${color}" title="${act.bidang}"></div>`;
+                    }
+                    chartHtml += '</div>';
+                });
+            });
+        }
+        chartHtml += '</div>';
+        return chartHtml;
+    }
+
+    function renderRumusan() {
+        const filteredActivities = getFilteredActivities();
+        const grouped = filteredActivities.reduce((acc, act) => {
+            const bidang = act.bidang || 'Lain-lain'; if (!acc[bidang]) acc[bidang] = { activities: [], totalCost: 0 };
+            const cost = (act.anggaran_perbelanjaan || []).reduce((sum, item) => sum + ((parseFloat(item.kuantiti) || 0) * (parseFloat(item.kos_seunit) || 0)), 0);
+            acc[bidang].activities.push(act); acc[bidang].totalCost += cost; return acc;
+        }, {});
+        let grandTotal = 0; let html = '<div class="space-y-6">';
+        if (Object.keys(grouped).length === 0) {
+            html += `<p class="text-center text-gray-500">Tiada data untuk tahun ${selectedYear}.</p>`;
+        } else {
+            for (const bidang in grouped) {
+                grandTotal += grouped[bidang].totalCost;
+                html += `<div class="border rounded-lg p-4"><h3 class="text-lg font-bold text-indigo-700">${bidang}</h3><ul class="list-disc list-inside mt-2 text-gray-700 space-y-1">${grouped[bidang].activities.map(act => `<li>${act.tajuk}</li>`).join('')}</ul><p class="text-right font-bold mt-3">Jumlah Kos Bidang: RM ${grouped[bidang].totalCost.toFixed(2)}</p></div>`;
+            }
+            html += `<div class="text-right font-extrabold text-xl mt-6 pt-4 border-t">JUMLAH KESELURUHAN: RM ${grandTotal.toFixed(2)}</div>`;
+        }
+        html += '</div>'; return html;
+    }
+
+    function renderPelaporan() {
+        const filteredActivities = getFilteredActivities();
+        if (filteredActivities.length === 0) return `<p class="text-center text-gray-500">Tiada data untuk tahun ${selectedYear}.</p>`;
+        return filteredActivities.map(act => `<div class="border rounded-lg p-4 flex justify-between items-center mb-3"><div><p class="font-bold">${act.tajuk}</p><p class="text-sm text-gray-600">Status: <span class="font-semibold ${act.status === 'Selesai' ? 'text-green-600' : 'text-yellow-600'}">${act.status}</span></p></div><div>${act.status === 'Selesai' ? `<button onclick="viewReport('${act.id}')" class="bg-gray-500 text-white px-3 py-1 rounded text-sm">Lihat Laporan</button>` : `<button onclick="openReportModal('${act.id}')" class="bg-blue-500 text-white px-3 py-1 rounded text-sm">Buat Laporan</button>`}</div></div>`).join('');
+    }
+
+    function renderKewangan() {
+        const filteredActivities = getFilteredActivities();
+        let allItems = []; let grandTotal = 0;
+        filteredActivities.forEach(act => {
+            (act.anggaran_perbelanjaan || []).forEach(item => {
+                const total = (parseFloat(item.kuantiti) || 0) * (parseFloat(item.kos_seunit) || 0);
+                allItems.push({ program: act.tajuk, butiran: item.butiran, kuantiti: item.kuantiti, kos_seunit: (parseFloat(item.kos_seunit) || 0).toFixed(2), jumlah: total.toFixed(2) });
+                grandTotal += total;
+            });
+        });
+        if (allItems.length === 0) return `<p class="text-center text-gray-500">Tiada data kewangan untuk tahun ${selectedYear}.</p>`;
+        let tableBody = allItems.map((item, index) => `<tr class="border-b"><td class="py-2 px-3 text-center">${index + 1}</td><td class="py-2 px-3">${item.program}</td><td class="py-2 px-3">${item.butiran}</td><td class="py-2 px-3 text-center">${item.kuantiti}</td><td class="py-2 px-3 text-right">RM ${item.kos_seunit}</td><td class="py-2 px-3 text-right font-semibold">RM ${item.jumlah}</td></tr>`).join('');
+        return `<div class="overflow-x-auto"><table class="w-full text-sm"><thead class="bg-gray-100"><tr><th class="py-2 px-3 text-center">Bil.</th><th class="py-2 px-3 text-left">Program</th><th class="py-2 px-3 text-left">Butiran</th><th class="py-2 px-3 text-center">Kuantiti</th><th class="py-2 px-3 text-right">Kos Seunit</th><th class="py-2 px-3 text-right">Jumlah</th></tr></thead><tbody>${tableBody}</tbody><tfoot><tr class="font-bold bg-gray-200"><td colspan="5" class="py-3 px-3 text-right">JUMLAH KESELURUHAN</td><td class="py-3 px-3 text-right">RM ${grandTotal.toFixed(2)}</td></tr></tfoot></table></div>`;
+    }
+
+    // --- MODAL & FORM LOGIC ---
+    function setupModals() {
+        document.getElementById('add-kewangan-item').onclick = addKewanganRow;
+        document.getElementById('cancel-kk-btn').onclick = () => document.getElementById('kertas-kerja-modal').classList.add('hidden');
+        document.getElementById('save-kk-btn').onclick = saveKertasKerja;
+        document.getElementById('cancel-report-btn').onclick = () => document.getElementById('report-modal').classList.add('hidden');
+        document.getElementById('save-report-btn').onclick = saveReport;
+        document.getElementById('close-view-report-btn').onclick = () => document.getElementById('view-report-modal').classList.add('hidden');
+        document.getElementById('cancel-delete-btn').onclick = () => document.getElementById('confirm-delete-modal').classList.add('hidden');
+        document.getElementById('confirm-delete-btn').addEventListener('click', () => {
+            if (activityToDeleteId) { deleteActivityFromSheet(activityToDeleteId); document.getElementById('confirm-delete-modal').classList.add('hidden'); }
+        });
+    }
+
+    function openKertasKerjaModal(activityId = null) {
+        const modal = document.getElementById('kertas-kerja-modal');
+        const fields = ['tajuk', 'pengenalan', 'matlamat', 'objektif', 'sasaran', 'tarikh', 'tempat', 'bidang', 'tentatif', 'kaedah', 'penilaian', 'jawatankuasa', 'disediakan', 'disemak', 'penutup'];
+        fields.forEach(f => { document.getElementById(`kk-${f}`).value = ''; });
+        document.getElementById('kk-activity-id').value = '';
+        document.getElementById('kk-kewangan-items').innerHTML = '';
+        
+        if (activityId) {
+            const activity = activities.find(a => a.id === activityId);
+            if (activity) {
+                document.getElementById('kk-activity-id').value = activity.id;
+                Object.keys(activity).forEach(key => {
+                    const element = document.getElementById(`kk-${key.replace('_oleh', '')}`);
+                    if (element) element.value = activity[key];
+                });
+                (activity.anggaran_perbelanjaan || []).forEach(item => addKewanganRow(item));
+            }
+        } else {
+             addKewanganRow();
+        }
+        modal.classList.remove('hidden');
+    }
+
+    function addKewanganRow(item = { butiran: '', kuantiti: '', kos_seunit: '' }) {
+        const div = document.createElement('div');
+        div.className = 'flex items-center space-x-2';
+        div.innerHTML = `<input type="text" class="butiran flex-grow p-1 border rounded" placeholder="Butiran" value="${item.butiran}"><input type="number" class="kuantiti w-24 p-1 border rounded" placeholder="Kuantiti" value="${item.kuantiti}"><span class="font-bold">x</span><input type="number" class="kos_seunit w-28 p-1 border rounded" placeholder="Kos Seunit (RM)" value="${item.kos_seunit}"><button type="button" onclick="this.parentElement.remove()" class="text-red-500 font-bold p-1">X</button>`;
+        document.getElementById('kk-kewangan-items').appendChild(div);
+    }
+
+    function saveKertasKerja() {
+        const activityId = document.getElementById('kk-activity-id').value;
+        const kewanganItems = [];
+        document.querySelectorAll('#kk-kewangan-items > div').forEach(row => { kewanganItems.push({ butiran: row.querySelector('.butiran').value, kuantiti: row.querySelector('.kuantiti').value, kos_seunit: row.querySelector('.kos_seunit').value }); });
+        const updatedData = {
+            tajuk: document.getElementById('kk-tajuk').value, pengenalan: document.getElementById('kk-pengenalan').value, matlamat: document.getElementById('kk-matlamat').value, objektif: document.getElementById('kk-objektif').value,
+            sasaran: document.getElementById('kk-sasaran').value, tarikh_hari: document.getElementById('kk-tarikh').value, tempat: document.getElementById('kk-tempat').value, bidang: document.getElementById('kk-bidang').value,
+            tentatif: document.getElementById('kk-tentatif').value, kaedah: document.getElementById('kk-kaedah').value, penilaian: document.getElementById('kk-penilaian').value, anggaran_perbelanjaan: kewanganItems,
+            jawatankuasa: document.getElementById('kk-jawatankuasa').value, disediakan_oleh: document.getElementById('kk-disediakan').value, disemak_oleh: document.getElementById('kk-disemak').value, penutup: document.getElementById('kk-penutup').value
+        };
+        const existingActivity = activities.find(a => a.id === activityId);
+        if (existingActivity) {
+            const fullyUpdatedActivity = { ...existingActivity, ...updatedData };
+            updateActivityInSheet(fullyUpdatedActivity);
+        }
+        document.getElementById('kertas-kerja-modal').classList.add('hidden');
+    }
+
+    function openReportModal(activityId) {
+        const activity = activities.find(a => a.id === activityId);
+        document.getElementById('report-modal-title').innerText = `Buat Laporan: ${activity.tajuk}`;
+        document.getElementById('report-activity-id').value = activityId;
+        document.getElementById('report-laporan').value = activity.laporan_pelaksanaan || ''; document.getElementById('report-gambar-urls').value = activity.gambar_urls || '';
+        document.getElementById('report-modal').classList.remove('hidden');
+    }
+
+    function saveReport() {
+        const activityId = document.getElementById('report-activity-id').value;
+        const existingActivity = activities.find(a => a.id === activityId);
+        if (existingActivity) {
+            const updatedActivity = { ...existingActivity, status: 'Selesai', laporan_pelaksanaan: document.getElementById('report-laporan').value, gambar_urls: document.getElementById('report-gambar-urls').value };
+            updateActivityInSheet(updatedActivity);
+        }
+        document.getElementById('report-modal').classList.add('hidden');
+    }
+
+    function viewReport(activityId) {
+        const activity = activities.find(a => a.id === activityId);
+        document.getElementById('view-report-title').innerText = `Laporan: ${activity.tajuk}`;
+        let contentHtml = `<div class="prose max-w-none"><p>${(activity.laporan_pelaksanaan || '').replace(/\n/g, '<br>')}</p>`;
+        if (activity.gambar_urls) {
+            contentHtml += `<h3>Gambar Pelaksanaan</h3><div class="grid grid-cols-2 gap-4 mt-2">`;
+            activity.gambar_urls.split(',').forEach(url => { if (url.trim()) contentHtml += `<div><img src="${url.trim()}" alt="Gambar Pelaksanaan" class="rounded-lg shadow"></div>`; });
+            contentHtml += `</div>`;
+        }
+        contentHtml += `</div>`;
+        document.getElementById('view-report-content').innerHTML = contentHtml;
+        document.getElementById('download-report-pdf-btn').onclick = () => generatePdf('laporan_lengkap', activityId);
+        document.getElementById('view-report-modal').classList.remove('hidden');
+    }
+
+    function saveMainActivity() {
+        const activityId = document.getElementById('edit-activity-id').value;
+        const activityData = {
+            tajuk: document.getElementById('main-tajuk').value || 'Aktiviti Belum Dinamakan',
+            tarikh_hari: document.getElementById('main-tarikh').value || '',
+            bidang: document.getElementById('main-bidang').value || 'Lain-lain',
+            objektif: document.getElementById('main-objektif').value || '',
+            sasaran: document.getElementById('main-sasaran').value || '',
+            anggaran_perbelanjaan: [{ butiran: 'Anggaran Keseluruhan', kuantiti: '1', kos_seunit: document.getElementById('main-kewangan').value || '0' }]
+        };
+        if (!activityData.tajuk.trim()) { alert('Sila masukkan sekurang-kurangnya Tajuk Program.'); return; }
+        if (activityId) {
+            const existingActivity = activities.find(a => a.id === activityId);
+            const updatedActivity = { ...existingActivity, ...activityData };
+            updateActivityInSheet(updatedActivity);
+        } else {
+            const newActivity = {
+                id: Date.now().toString(), ...activityData,
+                pengenalan: '', matlamat: '', tempat: '', tentatif: '', kaedah: '', penilaian: '',
+                jawatankuasa: '', disediakan_oleh: '', disemak_oleh: '', penutup: '',
+                status: 'Dirancang', laporan_pelaksanaan: null, gambar_urls: null
+            };
+            addActivityToSheet(newActivity);
+        }
+    }
+
+    function editActivity(id) {
+        const activity = activities.find(a => a.id === id);
+        if (!activity) return;
+        document.getElementById('edit-activity-id').value = activity.id;
+        document.getElementById('main-tajuk').value = activity.tajuk;
+        document.getElementById('main-tarikh').value = activity.tarikh_hari;
+        document.getElementById('main-bidang').value = activity.bidang;
+        document.getElementById('main-objektif').value = activity.objektif;
+        document.getElementById('main-sasaran').value = activity.sasaran;
+        document.getElementById('main-kewangan').value = (activity.anggaran_perbelanjaan[0] || {}).kos_seunit || 0;
+        window.scrollTo(0, 0);
+    }
+
+    function deleteActivity(id) {
+        activityToDeleteId = id;
+        document.getElementById('confirm-delete-modal').classList.remove('hidden');
+    }
+
+    // --- PDF GENERATION ---
+    function generatePdf(type, id = null) {
+        const { jsPDF } = window.jspdf;
+        const doc = new jsPDF();
+        const activity = id ? activities.find(a => a.id === id) : null;
+        doc.setFont('helvetica', 'normal');
+        const getPdfTitle = (baseTitle) => selectedYear === 'semua' ? baseTitle : `${baseTitle} Tahun ${selectedYear}`;
+        const addHeaderFooter = (title) => {
+            const pageCount = doc.internal.getNumberOfPages();
+            for (let i = 1; i <= pageCount; i++) {
+                doc.setPage(i);
+                doc.setFontSize(14).setFont(undefined, 'bold').text(title, doc.internal.pageSize.width / 2, 15, { align: 'center' });
+                doc.setFontSize(8).text(`Sistem Pengurusan B&K v6.0 - Muka Surat ${i} / ${pageCount}`, doc.internal.pageSize.width / 2, 285, { align: 'center' });
+            }
+        };
+        if (type === 'kertas_kerja' && activity) {
+            doc.setFontSize(16).setFont(undefined, 'bold').text('KERTAS KERJA PROGRAM', 105, 15, { align: 'center' });
+            doc.setFontSize(14).setFont(undefined, 'bold').text(activity.tajuk.toUpperCase(), 105, 22, { align: 'center', maxWidth: 180 });
+            let y = 35;
+            const checkPageBreak = () => { if (y > 250) { doc.addPage(); y = 20; } };
+            const addSection = (title, content) => { if (!content || content.trim() === '') return; checkPageBreak(); doc.setFontSize(12).setFont(undefined, 'bold').text(title, 14, y); y += 7; doc.setFontSize(11).setFont(undefined, 'normal'); const splitText = doc.splitTextToSize(content, 180); doc.text(splitText, 14, y); y += (splitText.length * 5) + 8; };
+            const addDetail = (label, value) => { if(!value || value.trim() === '') return; doc.setFontSize(11).setFont(undefined, 'bold').text(label, 18, y); doc.setFont(undefined, 'normal').text(`: ${value}`, 65, y); y += 6; };
+            addSection('1.0 PENGENALAN', activity.pengenalan); addSection('2.0 MATLAMAT', activity.matlamat); addSection('3.0 OBJEKTIF', activity.objektif); checkPageBreak(); doc.setFontSize(12).setFont(undefined, 'bold').text('4.0 BUTIRAN PROGRAM', 14, y); y += 7; addDetail('Kumpulan Sasaran', activity.sasaran); addDetail('Jangkamasa / Tarikh', activity.tarikh_hari); addDetail('Tempat', activity.tempat); y += 4; addSection('5.0 TENTATIF PROGRAM', activity.tentatif); addSection('6.0 KAEDAH PELAKSANAAN', activity.kaedah); addSection('7.0 PENILAIAN', activity.penilaian); checkPageBreak(); doc.setFontSize(12).setFont(undefined, 'bold').text('8.0 IMPLIKASI KEWANGAN', 14, y); y += 7;
+            const totalCost = (activity.anggaran_perbelanjaan || []).reduce((sum, item) => sum + ((parseFloat(item.kuantiti) || 0) * (parseFloat(item.kos_seunit) || 0)), 0);
+            doc.autoTable({ startY: y, theme: 'grid', head: [['Bil', 'Butiran', 'Kuantiti x Kos Seunit (RM)', 'Jumlah (RM)']], body: (activity.anggaran_perbelanjaan || []).map((item, i) => [i + 1, item.butiran, `${item.kuantiti || 0} x RM ${(parseFloat(item.kos_seunit) || 0).toFixed(2)}`, `RM ${((parseFloat(item.kuantiti) || 0) * (parseFloat(item.kos_seunit) || 0)).toFixed(2)}`]), foot: [['', 'JUMLAH KESELURUHAN', '', `RM ${totalCost.toFixed(2)}`]], footStyles: { fontStyle: 'bold', halign: 'right' } });
+            y = doc.autoTable.previous.finalY + 10;
+            addSection('9.0 JAWATANKUASA KERJA', activity.jawatankuasa); addSection('10.0 PENUTUP', activity.penutup); checkPageBreak(); y += 10;
+            const preparedBy = activity.disediakan_oleh || ''; const checkedBy = activity.disemak_oleh || '';
+            const preparedByLines = doc.splitTextToSize(preparedBy, 80); const checkedByLines = doc.splitTextToSize(checkedBy, 80);
+            doc.text('Disediakan oleh,', 14, y); doc.text('Disemak oleh,', 120, y); y += 20;
+            doc.text('..................................................', 14, y); doc.text('..................................................', 120, y); y += 5;
+            doc.text(preparedByLines, 14, y); doc.text(checkedByLines, 120, y);
+            doc.save(`KertasKerja_${activity.tajuk.replace(/\s/g, '_')}.pdf`); return;
+        }
+        if (type === 'laporan_lengkap' && activity) {
+            const title = 'Laporan Pelaksanaan Program';
+            doc.setFontSize(18).setFont(undefined, 'bold').text(activity.tajuk, doc.internal.pageSize.width / 2, 25, { align: 'center', maxWidth: 180 }); let y = 40;
+            const addDetail = (label, value) => { doc.setFontSize(11).setFont(undefined, 'bold').text(label, 14, y); doc.setFont(undefined, 'normal').text(`: ${value}`, 50, y); y += 7; };
+            addDetail('Tarikh', activity.tarikh_hari); addDetail('Tempat', activity.tempat); addDetail('Sasaran', activity.sasaran); y += 5; doc.setFontSize(12).setFont(undefined, 'bold').text('Laporan Pelaksanaan:', 14, y); y += 7; doc.setFontSize(11).setFont(undefined, 'normal');
+            const splitText = doc.splitTextToSize(activity.laporan_pelaksanaan || 'Tiada laporan disediakan.', 180); doc.text(splitText, 14, y); y += (splitText.length * 5) + 10;
+            if (activity.gambar_urls) {
+                doc.setFontSize(12).setFont(undefined, 'bold').text('Pautan Gambar Pelaksanaan:', 14, y); y += 7; doc.setFontSize(10).setFont(undefined, 'normal').setTextColor(0, 0, 255);
+                activity.gambar_urls.split(',').forEach(url => { if (url.trim()) { doc.textWithLink(url.trim(), 14, y, { url: url.trim() }); y += 6; } });
+            }
+            addHeaderFooter(title); doc.save(`Laporan_${activity.tajuk.replace(/\s/g, '_')}.pdf`); return;
+        }
+        const filteredActivities = getFilteredActivities();
+        if (filteredActivities.length === 0) { alert(`Tiada data untuk menjana laporan PDF bagi tahun ${selectedYear}.`); return; }
+        let title = '', head = [], body = [];
+        switch (type) {
+            case 'takwim':
+                title = getPdfTitle('Takwim Program B&K'); head = [['Bil.', 'Tarikh', 'Program', 'Tempat', 'Sasaran']];
+                body = filteredActivities.sort((a,b)=>b.id.localeCompare(a.id)).map((act, i) => [i + 1, act.tarikh_hari, act.tajuk, act.tempat, act.sasaran]);
+                break;
+            case 'rumusan':
+                title = getPdfTitle('Rumusan Program Mengikut Bidang');
+                const grouped = filteredActivities.reduce((acc, act) => { const bidang = act.bidang || 'Lain-lain'; if (!acc[bidang]) acc[bidang] = { activities: [], totalCost: 0 }; const cost = (act.anggaran_perbelanjaan || []).reduce((sum, item) => sum + ((parseFloat(item.kuantiti) || 0) * (parseFloat(item.kos_seunit) || 0)), 0); acc[bidang].activities.push(act.tajuk); acc[bidang].totalCost += cost; return acc; }, {});
+                let y_rumusan = 25; let grandTotal_rumusan = 0;
+                for (const bidang in grouped) {
+                    if (y_rumusan > 250) { doc.addPage(); y_rumusan = 25; }
+                    doc.setFontSize(12).setFont(undefined, 'bold').text(bidang, 14, y_rumusan); y_rumusan += 7;
+                    doc.setFontSize(10).setFont(undefined, 'normal'); grouped[bidang].activities.forEach(tajuk => { doc.text(`- ${tajuk}`, 18, y_rumusan); y_rumusan += 5; });
+                    doc.setFont(undefined, 'bold').text(`Jumlah Kos Bidang: RM ${grouped[bidang].totalCost.toFixed(2)}`, 195, y_rumusan, { align: 'right' }); y_rumusan += 10; grandTotal_rumusan += grouped[bidang].totalCost;
+                }
+                doc.setLineWidth(0.5); doc.line(14, y_rumusan, 195, y_rumusan); y_rumusan += 8;
+                doc.setFontSize(14).setFont(undefined, 'bold').text(`JUMLAH KESELURUHAN`, 14, y_rumusan); doc.text(`RM ${grandTotal_rumusan.toFixed(2)}`, 195, y_rumusan, { align: 'right' });
+                addHeaderFooter(title); doc.save(`${type}_${selectedYear}.pdf`); return;
+            case 'pelaporan':
+                title = getPdfTitle('Status Laporan Program'); head = [['Bil.', 'Program', 'Tarikh', 'Status Laporan']];
+                body = filteredActivities.map((act, i) => [i + 1, act.tajuk, act.tarikh_hari, act.status]);
+                break;
+            case 'kewangan':
+                title = getPdfTitle('Penyata Kewangan Program'); head = [['Bil.', 'Program', 'Butiran', 'Kuantiti', 'Kos Seunit (RM)', 'Jumlah (RM)']];
+                let grandTotal_kewangan = 0; let counter = 1;
+                filteredActivities.forEach(act => {
+                    (act.anggaran_perbelanjaan || []).forEach(item => {
+                        const total = (parseFloat(item.kuantiti) || 0) * (parseFloat(item.kos_seunit) || 0); grandTotal_kewangan += total;
+                        body.push([counter++, act.tajuk, item.butiran, item.kuantiti, (parseFloat(item.kos_seunit) || 0).toFixed(2), total.toFixed(2)]);
+                    });
+                });
+                body.push([{ content: 'JUMLAH KESELURUHAN', colSpan: 5, styles: { halign: 'right', fontStyle: 'bold' } }, { content: `RM ${grandTotal_kewangan.toFixed(2)}`, styles: { fontStyle: 'bold' } }]);
+                break;
+        }
+        doc.autoTable({ head, body, startY: 25, theme: 'grid' });
+        addHeaderFooter(title);
+        doc.save(`${type}_${selectedYear}.pdf`);
+    }
+
+    // --- EVENT LISTENERS ---
+    function setupEventListeners() {
+        document.getElementById('save-settings-btn').addEventListener('click', () => {
+            APP_CONFIG.API_KEY = document.getElementById('apiKey').value.trim();
+            APP_CONFIG.CLIENT_ID = document.getElementById('clientId').value.trim();
+            APP_CONFIG.SHEET_ID = document.getElementById('sheetId').value.trim();
+            if (APP_CONFIG.API_KEY && APP_CONFIG.CLIENT_ID && APP_CONFIG.SHEET_ID) {
+                localStorage.setItem(CONFIG_KEY, JSON.stringify(APP_CONFIG));
+                location.reload();
+            } else { alert('Sila isi semua maklumat.'); }
+        });
+        document.getElementById('auth-button').onclick = handleAuthClick;
+        document.getElementById('main-nav').addEventListener('click', (e) => {
+            if (e.target.matches('.nav-button')) {
+                document.querySelectorAll('.nav-button').forEach(btn => btn.classList.remove('active'));
+                e.target.classList.add('active');
+                renderPage(e.target.dataset.page);
+            }
+        });
+        document.getElementById('page-content').addEventListener('click', (e) => {
+            const target = e.target;
+            if (target.id === 'pdf-download-btn') { const pageId = document.querySelector('.nav-button.active').dataset.page; generatePdf(pageId); } 
+            else if (target.id === 'save-main-activity') { saveMainActivity(); } 
+            else if (target.id === 'clear-main-form') { document.getElementById('edit-activity-id').value = ''; renderCurrentPage(); } 
+            else if (target.matches('.edit-activity-btn')) { editActivity(target.dataset.id); } 
+            else if (target.matches('.delete-activity-btn')) { deleteActivity(target.dataset.id); } 
+            else if (target.matches('.upgrade-kk-btn')) { openKertasKerjaModal(target.dataset.id); }
+        });
+        document.getElementById('page-content').addEventListener('change', (e) => { if (e.target.id === 'year-filter') { selectedYear = e.target.value; renderCurrentPage(); } });
+        setupModals();
+    }
+
+    // --- INITIALIZATION ---
+    document.addEventListener('DOMContentLoaded', () => {
+        const savedConfig = JSON.parse(localStorage.getItem(CONFIG_KEY));
+        if (savedConfig && savedConfig.API_KEY) {
+            APP_CONFIG = savedConfig;
+            document.getElementById('settings-modal').classList.add('hidden');
+            document.getElementById('main-container').classList.remove('hidden');
+        } else {
+            document.getElementById('settings-modal').classList.remove('hidden');
+        }
+        setupEventListeners();
+        renderCurrentPage();
+    });
+
+    function setLoading(isLoading) { document.getElementById('loading-overlay').classList.toggle('hidden', !isLoading); }
+});
+</script>
+
+</body>
+</html>
+
